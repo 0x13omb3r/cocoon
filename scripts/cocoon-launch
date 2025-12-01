@@ -216,6 +216,21 @@ def load_config_from_file(cli_args) -> Config:
     def getint(key, default):
         val = get(key)
         return int(val) if val is not None else default
+    
+    def getbool(key, default=False):
+        """Get boolean from config or CLI args"""
+        print(f"get {key}")
+        cli_val = getattr(cli_args, key, None)
+        if cli_val is not None:
+            print(f"has {cli_val} in cli")
+            return cli_val
+        val = ini.get('node', key, fallback=None)
+        print(f"has {val} in config")
+        if val is None:
+            return default
+        # Handle various boolean representations
+        print(key, val)
+        return val.lower() in ('true', 'yes', '1', 'on')
 
     script_dir = Path(__file__).parent.parent
     build_dir = get('build_dir') or os.environ.get('BUILD_DIR') or str(script_dir / 'cmake-build-default-tdx')
@@ -231,8 +246,8 @@ def load_config_from_file(cli_args) -> Config:
 
     # Auto-spec
     spec = cli_args.spec or str(script_dir / 'spec' / f'spec-{node_type}')
-    fake_ton = cli_args.fake_ton
-    test = cli_args.test
+    fake_ton = getbool('fake_ton', False)
+    test = getbool('test', False)
 
     # Build config (ordered to match Config dataclass)
     cfg = Config(
@@ -789,8 +804,8 @@ def parse_args():
     parser.add_argument('--ton-config', dest='ton_config', help='User-provided TON config (liteservers)')
 
     # Modes
-    parser.add_argument('--test', action='store_true', help='Test mode (debug shell, SSH)')
-    parser.add_argument('--fake-ton', '--pseudo', action='store_true', dest='fake_ton',
+    parser.add_argument('--test', action='store_true', default=None, help='Test mode (debug shell, SSH)')
+    parser.add_argument('--fake-ton', '--pseudo', action='store_true', default=None, dest='fake_ton',
                         help='Fake-TON mode (disable real TON network)')
     parser.add_argument('--local-all', action='store_true', help='Run all components locally')
     parser.add_argument('--prepare-only', action='store_true', help='Prepare spec to /tmp/spec/')
