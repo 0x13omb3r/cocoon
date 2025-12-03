@@ -5,6 +5,8 @@
 #include "ClientRunningRequest.h"
 #include "ClientStats.h"
 #include "auto/tl/cocoon_api.h"
+#include "checksum.h"
+#include "common/bitstring.h"
 #include "runners/BaseRunner.hpp"
 #include "td/actor/ActorId.h"
 #include "td/actor/PromiseFuture.h"
@@ -29,6 +31,9 @@ class ClientRunner : public BaseRunner {
     return 1;
   }
   static constexpr td::int32 max_proto_version() {
+    return 1;
+  }
+  static constexpr size_t request_log_size() {
     return 1;
   }
 
@@ -148,9 +153,31 @@ class ClientRunner : public BaseRunner {
   std::string http_withdraw(const std::string &proxy_sc_address) {
     return wrap_short_answer_to_http(cmd_withdraw(proxy_sc_address));
   }
+  std::string http_get_request_debug_info(const std::string &request_guid) {
+    auto id = td::sha256_bits256(request_guid);
+    auto it = request_debug_info_.find(id);
+    if (it != request_debug_info_.end()) {
+      return it->second;
+    } else {
+      return "{}";
+    }
+  }
 
   const auto &stats() const {
     return stats_;
+  }
+
+  void add_request_debug_info(td::Bits256 request_id, std::string value) {
+    if (request_debug_info_.count(request_id)) {
+      return;
+    }
+    request_debug_info_.emplace(request_id, std::move(value));
+    request_debug_info_lru_.push_back(request_id);
+
+    if (request_debug_info_lru_.size() > request_log_size()) {
+      CHECK(request_debug_info_.erase(request_debug_info_lru_.front()));
+      request_debug_info_lru_.pop_front();
+    }
   }
 
  private:
@@ -159,6 +186,8 @@ class ClientRunner : public BaseRunner {
   td::Bits256 secret_hash_ = td::Bits256::zero();
   std::map<std::string, std::shared_ptr<ClientProxyInfo>> proxies_;
   std::map<td::Bits256, td::actor::ActorId<ClientRunningRequest>> running_queries_;
+  std::map<td::Bits256, std::string> request_debug_info_;
+  std::list<td::Bits256> request_debug_info_lru_;
 
   std::unique_ptr<td::Ed25519::PrivateKey> wallet_private_key_;
   td::Bits256 wallet_public_key_;

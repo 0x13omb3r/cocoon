@@ -2,6 +2,7 @@
 
 #include "auto/tl/cocoon_api.h"
 #include "auto/tl/cocoon_api.hpp"
+#include "common/bitstring.h"
 #include "errorcode.h"
 #include "http/http.h"
 #include "runners/BaseRunner.hpp"
@@ -115,6 +116,7 @@ class ClientRunningRequest : public td::actor::Actor {
   td::int64 payload_bytes_{0};
   bool keep_alive_{false};
   bool enable_debug_{false};
+  td::Bits256 ext_request_id_ = td::Bits256::zero();
 };
 
 }  // namespace cocoon

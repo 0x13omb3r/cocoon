@@ -206,6 +206,15 @@ void ClientRunner::custom_initialize(td::Promise<td::Unit> promise) {
           td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
               promise) { http_send_static_answer(http_withdraw(get_args["proxy"]), std::move(promise)); });
   register_custom_http_handler(
+      "/request/debuglogentry",
+      [&](std::string url, std::map<std::string, std::string> get_args, std::unique_ptr<ton::http::HttpRequest> request,
+          std::shared_ptr<ton::http::HttpPayload> payload,
+          td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
+              promise) {
+        http_send_static_answer(http_get_request_debug_info(get_args["request_guid"]), std::move(promise),
+                                "application/json");
+      });
+  register_custom_http_handler(
       "/favicon.ico",
       [&](std::string url, std::map<std::string, std::string> get_args, std::unique_ptr<ton::http::HttpRequest> request,
           std::shared_ptr<ton::http::HttpPayload> payload,

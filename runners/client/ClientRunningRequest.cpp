@@ -1,6 +1,7 @@
 #include "ClientRunningRequest.h"
 #include "ClientRunner.hpp"
 #include "auto/tl/cocoon_api.h"
+#include "checksum.h"
 #include "nlohmann/detail/conversions/from_json.hpp"
 #include "nlohmann/detail/conversions/to_json.hpp"
 #include "td/actor/actor.h"
@@ -95,6 +96,13 @@ void ClientRunningRequest::on_payload_downloaded(td::BufferSlice payload) {
       }
       enable_debug_ = b["enable_debug"].get<bool>();
       b.erase("enable_debug");
+    }
+    if (b.contains("request_guid")) {
+      if (!b["request_guid"].is_string()) {
+        return td::Status::Error(ton::ErrorCode::protoviolation, "field 'request_guid' must be a string");
+      }
+      ext_request_id_ = td::sha256_bits256(b["request_guid"].get<std::string>());
+      b.erase("request_guid");
     }
     payload = td::BufferSlice(b.dump());
     return td::Status::OK();
@@ -317,6 +325,7 @@ void ClientRunningRequest::finish_request(bool is_success,
   out_payload_->complete_parse();
 
   td::actor::send_closure(client_runner_, &ClientRunner::finish_request, request_id_, proxy_);
+
   stop();
 }
 
@@ -335,7 +344,6 @@ nlohmann::json ClientRunningRequest::generate_client_debug_inner() {
 
 void ClientRunningRequest::add_last_payload_part_with_debug(
     td::BufferSlice part, const ton::tl_object_ptr<cocoon_api::client_queryFinalInfo> &info) {
-  LOG(ERROR) << "part_size=" << part.size();
   nlohmann::json v = nlohmann::json::object();
   if (info && info->proxy_debug_.size() > 0) {
     v["proxy"] = nlohmann::json::parse(info->proxy_debug_);
@@ -344,6 +352,10 @@ void ClientRunningRequest::add_last_payload_part_with_debug(
     v["worker"] = nlohmann::json::parse(info->worker_debug_);
   }
   v["client"] = generate_client_debug_inner();
+
+  if (enable_debug_ && !ext_request_id_.is_zero()) {
+    td::actor::send_closure(client_runner_, &ClientRunner::add_request_debug_info, ext_request_id_, v.dump());
+  }
 
   if (part.size() == 0) {
     nlohmann::json w;
@@ -370,7 +382,6 @@ void ClientRunningRequest::add_last_payload_part_with_debug(
       nlohmann::json w;
       ss >> w;
       size_t pos = ss.tellg();
-      LOG(ERROR) << "pos=" << pos << " old_pos=" << old_pos << " size=" << SS.size();
       if (pos == old_pos) {
         break;
       }
