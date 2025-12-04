@@ -785,6 +785,7 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark LLM translation endpoint')
     
     # Common translation arguments (without concurrency - we have different default)
+    # Includes --config option
     add_translate_args(parser, include_concurrency=False)
     
     # Benchmark-specific arguments
@@ -868,8 +869,10 @@ def main():
             print(f"  Average chunk length: {sum(chunk_lengths) / len(chunk_lengths):.0f} chars")
             print(f"  Total characters: {sum(chunk_lengths)}")
 
-    # Create config
+    # Create config from file or args (config_from_args handles both)
     config = config_from_args(args)
+    if args.config:
+        print(f"Loaded config from: {args.config}")
 
     # Ensure target_langs is set for CSV output
     if target_langs is None:

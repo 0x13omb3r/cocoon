@@ -10,7 +10,7 @@ Usage:
 
 import sys
 import argparse
-from translate import translate, add_translate_args, config_from_args, load_config_from_file
+from translate import translate, add_translate_args, config_from_args
 
 
 def main():
@@ -21,8 +21,6 @@ def main():
                         help='Text to translate (alternative to stdin)')
     parser.add_argument('--query-file', type=str,
                         help='Read text from file (alternative to stdin)')
-    parser.add_argument('--config', type=str,
-                        help='Load model config from INI file')
     add_translate_args(parser)
     
     args = parser.parse_args()
@@ -41,18 +39,28 @@ def main():
             if sys.stdin.isatty():
                 print('Paste text (Ctrl+D when done):', file=sys.stderr)
             text = sys.stdin.read().strip()
-        
+
         if not text:
             sys.exit("No text provided.")
 
-        # Load config from file or args
-        config = load_config_from_file(args.config) if args.config else config_from_args(args)
+        # Load config from file or args (config_from_args handles both)
+        config = config_from_args(args)
 
         print(f"Translating to {args.target_lang}...", file=sys.stderr)
         print(f"  Endpoint: {config.endpoint}" + (" (Azure)" if config.use_azure else ""), file=sys.stderr)
         print(f"  Format: {config.prompt_format}", file=sys.stderr)
 
         result = translate(text, args.target_lang, config)
+        
+        if args.verbose:
+            if result.timing:
+                print(f"  Time: {result.timing.duration:.3f}s", file=sys.stderr)
+            if result.debug_data:
+                print(f"\n--- Debug Info ---", file=sys.stderr)
+                for key, value in result.debug_data.items():
+                    print(f"  {key}: {value}", file=sys.stderr)
+                print(f"--- End Debug ---\n", file=sys.stderr)
+        
         print(result.translation)
 
     except KeyboardInterrupt:

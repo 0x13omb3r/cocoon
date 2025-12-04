@@ -2,14 +2,14 @@
 """
 Translation Quality Evaluation Script
 
-Downloads WMT24++ benchmark data and evaluates translation quality using BLEU and chrF metrics.
+Downloads WMT24++ benchmark data and evaluates translation quality using COMET metric.
 Uses translate.py for translation.
 
 Dataset: https://huggingface.co/datasets/google/wmt24pp
 
 Usage:
-    pip install sacrebleu datasets
-    python quality_eval.py --endpoint http://127.0.0.1:8000 --pairs en-ru,en-zh
+    pip install unbabel-comet datasets rich
+    python quality_eval.py --configs azure.conf local.conf --pairs en-ru,en-zh
 """
 
 import argparse
@@ -23,24 +23,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import pandas as pd
 
-# Quality metrics
-try:
-    import sacrebleu
-    from sacrebleu.metrics import BLEU, CHRF
-except ImportError:
-    print("Please install sacrebleu: pip install sacrebleu")
-    sys.exit(1)
+# Rich for table printing
+from rich.console import Console
+from rich.table import Table
 
-# COMET - neural metric (optional but recommended)
+# COMET - neural metric
+from comet import download_model, load_from_checkpoint
 COMET_MODEL = None  # Global cache for COMET model
 COMET_MODEL_NAME = None  # Track which model is loaded
-try:
-    from comet import download_model, load_from_checkpoint
-    COMET_AVAILABLE = True
-except ImportError:
-    COMET_AVAILABLE = False
-    print("Note: COMET not available. Install with: pip install unbabel-comet")
-    print("      COMET gives better semantic evaluation than BLEU.\n")
 
 # Available COMET models
 COMET_MODELS = {
@@ -58,7 +48,7 @@ def get_comet_model(model_name: str = "wmt22"):
     if COMET_MODEL is not None and COMET_MODEL_NAME != model_name:
         COMET_MODEL = None
     
-    if COMET_MODEL is None and COMET_AVAILABLE:
+    if COMET_MODEL is None:
         model_id = COMET_MODELS.get(model_name, model_name)  # Allow direct model ID too
         print(f"Loading COMET model: {model_id} (one-time)...")
         import warnings
@@ -77,29 +67,17 @@ def get_comet_model(model_name: str = "wmt22"):
 
 def has_gpu() -> bool:
     """Check if GPU is available for COMET."""
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
+    import torch
+    return torch.cuda.is_available()
 
 
 # Dataset download
-try:
-    from datasets import load_dataset
-except ImportError:
-    print("Please install datasets: pip install datasets")
-    sys.exit(1)
+from datasets import load_dataset
 
-from translate import translate, TranslateConfig, load_config_from_file
+from translate import translate, TranslateConfig, config_from_args
 
 # Translation cache using DuckDB
-try:
-    import duckdb
-    DUCKDB_AVAILABLE = True
-except ImportError:
-    DUCKDB_AVAILABLE = False
-    print("Note: duckdb not available. Install for translation caching: pip install duckdb")
+import duckdb
 
 
 def _stable_hash(s: str) -> str:
@@ -116,7 +94,7 @@ class TranslationCache:
     
     def __init__(self, cache_path: Optional[str] = "translation_cache.duckdb"):
         self.cache_path = cache_path
-        self.enabled = cache_path is not None and DUCKDB_AVAILABLE
+        self.enabled = cache_path is not None
         self._local = threading.local()
         self._lock = threading.Lock()
         if self.enabled:
@@ -220,7 +198,7 @@ class TranslationCache:
             count = conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
             if count == 0:
                 return "empty"
-            configs = conn.execute("SELECT DISTINCT config_key FROM translations LIMIT 3").fetchall()
+            configs = conn.execute("SELECT DISTINCT config_key FROM translations LIMIT 10").fetchall()
             configs_str = ', '.join(c[0] for c in configs)
             return f"{count} entries, configs: {configs_str}"
         except:
@@ -352,8 +330,6 @@ class EvalResult:
     """Evaluation results for a language pair."""
     src_lang: str
     tgt_lang: str
-    bleu: float
-    chrf: float
     comet: Optional[float]
     num_samples: int
     num_errors: int
@@ -482,15 +458,18 @@ def evaluate_batch(
     num_samples: int = 100,
     concurrency: int = 1,
     verbose: bool = False,
-    comet_model: str = "wmt22"
+    comet_model: str = "wmt22",
+    label: str = ""
 ) -> List[EvalResult]:
     """
     Batch evaluation: load all data, translate all, evaluate all.
     Much faster for COMET (single batch instead of per-pair).
     """
+    model_tag = f"[{label}] " if label else ""
+    
     # Phase 1: Load all data (parallel)
     print(f"\n{'='*70}")
-    print("PHASE 1: Loading all test data")
+    print(f"{model_tag}PHASE 1: Loading all test data")
     print(f"{'='*70}")
     
     def load_pair(pair):
@@ -508,11 +487,11 @@ def evaluate_batch(
         all_pair_data = [r for r in results if r is not None]
     
     total_samples = sum(len(pd.samples) for pd in all_pair_data)
-    print(f"\nTotal: {total_samples} samples across {len(all_pair_data)} language pairs")
+    print(f"\n{model_tag}Total: {total_samples} samples across {len(all_pair_data)} language pairs")
     
     # Phase 2: Translate all (interleaved across pairs)
     print(f"\n{'='*70}")
-    print("PHASE 2: Translating all samples (interleaved)")
+    print(f"{model_tag}PHASE 2: Translating all samples (interleaved)")
     print(f"{'='*70}")
     
     # Build interleaved task list: round-robin across pairs
@@ -538,7 +517,7 @@ def evaluate_batch(
         cached = cache.get(sample.source, target_lang_name, config, debug=debug_cache)
         if cached:
             sample.hypothesis, sample.duration = cached
-            print(f"[{task_idx+1}/{total_samples}] {pair_label} ⚡ CACHED ({sample.duration:.2f}s) | {len(sample.source)} chars")
+            print(f"{model_tag}[{task_idx+1}/{total_samples}] {pair_label} ⚡ CACHED ({sample.duration:.2f}s) | {len(sample.source)} chars")
             return
         
         t0 = time.time()
@@ -546,14 +525,14 @@ def evaluate_batch(
             result = translate(sample.source, target_lang=target_lang_name, config=config)
             sample.hypothesis = result.translation
             sample.duration = time.time() - t0
-            print(f"[{task_idx+1}/{total_samples}] {pair_label} ✓ {sample.duration:.2f}s | {len(sample.source)} chars")
+            print(f"{model_tag}[{task_idx+1}/{total_samples}] {pair_label} ✓ {sample.duration:.2f}s | {len(sample.source)} chars")
             # Store in cache
             cache.put(sample.source, target_lang_name, config, sample.hypothesis, sample.duration)
         except Exception as e:
             sample.error = str(e)
             sample.duration = time.time() - t0
             error_msg = str(e)
-            print(f"[{task_idx+1}/{total_samples}] {pair_label} ✗ {sample.duration:.2f}s | Error: {error_msg}")
+            print(f"{model_tag}[{task_idx+1}/{total_samples}] {pair_label} ✗ {sample.duration:.2f}s | Error: {error_msg}")
             if "Expecting value" in error_msg or "JSONDecode" in error_msg:
                 print(f"      Source text: {sample.source[:100]}...")
     
@@ -575,12 +554,12 @@ def evaluate_batch(
     cache.save()
     
     translation_time = time.time() - start_time
-    print(f"\nTranslation complete: {translation_time:.1f}s total ({translation_time/total_samples:.2f}s per sample)")
-    print(f"Cache: {cache.stats()}")
+    print(f"\n{model_tag}Translation complete: {translation_time:.1f}s total ({translation_time/total_samples:.2f}s per sample)")
+    print(f"{model_tag}Cache: {cache.stats()}")
     
     # Phase 3: Evaluate all (COMET in single batch!)
     print(f"\n{'='*70}")
-    print("PHASE 3: Calculating metrics")
+    print(f"{model_tag}PHASE 3: Calculating metrics")
     print(f"{'='*70}")
     
     # Prepare all data for COMET (single batch)
@@ -613,9 +592,6 @@ def evaluate_batch(
     # Calculate per-pair metrics
     print("\nCalculating per-pair metrics...")
     results = []
-    bleu_metric = BLEU()
-    chrf_metric = CHRF()
-    sent_bleu_metric = BLEU(effective_order=True)
     
     for pair_idx, pd in enumerate(all_pair_data):
         successful = [s for s in pd.samples if s.hypothesis is not None]
@@ -624,17 +600,11 @@ def evaluate_batch(
         if not successful:
             results.append(EvalResult(
                 src_lang=pd.src_lang, tgt_lang=pd.tgt_lang,
-                bleu=0.0, chrf=0.0, comet=None,
+                comet=None,
                 num_samples=len(pd.samples), num_errors=len(errors),
                 avg_duration=0.0, samples=pd.samples
             ))
             continue
-        
-        hypotheses = [s.hypothesis for s in successful]
-        references = [[s.reference] for s in successful]
-        
-        bleu_score = bleu_metric.corpus_score(hypotheses, references)
-        chrf_score = chrf_metric.corpus_score(hypotheses, references)
         
         # Get COMET scores for this pair
         comet_score = None
@@ -650,8 +620,6 @@ def evaluate_batch(
         # Print results for this pair
         print(f"\n{'─'*70}")
         print(f"Results for {pd.src_lang} -> {pd.tgt_lang}:")
-        print(f"  BLEU:  {bleu_score.score:.2f}")
-        print(f"  chrF:  {chrf_score.score:.2f}")
         if comet_score is not None:
             print(f"  COMET: {comet_score:.4f}")
         print(f"  Samples: {len(successful)}/{len(pd.samples)} successful")
@@ -660,20 +628,17 @@ def evaluate_batch(
         num_examples = 5 if verbose else 3
         print(f"\nExamples:")
         for i, s in enumerate(successful[:num_examples]):
-            sent_bleu = sent_bleu_metric.sentence_score(s.hypothesis, [s.reference])
-            sent_chrf = chrf_metric.sentence_score(s.hypothesis, [s.reference])
-            
             if comet_scores_pair and i < len(comet_scores_pair):
-                print(f"\n  [{i+1}] BLEU: {sent_bleu.score:.1f} | chrF: {sent_chrf.score:.1f} | COMET: {comet_scores_pair[i]:.3f}")
+                print(f"\n  [{i+1}] COMET: {comet_scores_pair[i]:.3f}")
             else:
-                print(f"\n  [{i+1}] BLEU: {sent_bleu.score:.1f} | chrF: {sent_chrf.score:.1f}")
+                print(f"\n  [{i+1}]")
             print(f"      Source:     {s.source[:200]}{'...' if len(s.source) > 200 else ''}")
             print(f"      Reference:  {s.reference[:200]}{'...' if len(s.reference) > 200 else ''}")
             print(f"      Hypothesis: {s.hypothesis[:200]}{'...' if len(s.hypothesis) > 200 else ''}")
         
         results.append(EvalResult(
             src_lang=pd.src_lang, tgt_lang=pd.tgt_lang,
-            bleu=bleu_score.score, chrf=chrf_score.score, comet=comet_score,
+            comet=comet_score,
             num_samples=len(pd.samples), num_errors=len(errors),
             avg_duration=avg_duration, samples=pd.samples
         ))
@@ -762,8 +727,6 @@ def save_results(results: List[EvalResult], output_path: str):
         data.append({
             "src_lang": r.src_lang,
             "tgt_lang": r.tgt_lang,
-            "bleu": r.bleu,
-            "chrf": r.chrf,
             "comet": r.comet,
             "num_samples": r.num_samples,
             "num_errors": r.num_errors,
@@ -778,75 +741,57 @@ def save_results(results: List[EvalResult], output_path: str):
 
 def print_summary(results: List[EvalResult], title: str = "SUMMARY"):
     """Print summary table of all results."""
-    has_comet = any(r.comet is not None for r in results)
+    console = Console()
     
-    print(f"\n{'='*85}")
-    print(title)
-    print(f"{'='*85}")
-    if has_comet:
-        print(f"{'Pair':<12} {'BLEU':>8} {'chrF':>8} {'COMET':>8} {'Samples':>10} {'Errors':>8} {'Avg Time':>10}")
-    else:
-        print(f"{'Pair':<12} {'BLEU':>8} {'chrF':>8} {'Samples':>10} {'Errors':>8} {'Avg Time':>10}")
-    print(f"{'-'*85}")
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("Pair", style="cyan")
+    table.add_column("COMET", justify="right")
+    table.add_column("Samples", justify="right")
+    table.add_column("Errors", justify="right")
+    table.add_column("Avg Time", justify="right")
     
-    # Sort by COMET if available, otherwise by BLEU
-    sort_key = (lambda x: x.comet or 0) if has_comet else (lambda x: x.bleu)
-    for r in sorted(results, key=sort_key, reverse=True):
+    # Sort by COMET
+    for r in sorted(results, key=lambda x: x.comet or 0, reverse=True):
         pair = f"{r.src_lang}->{r.tgt_lang}"
-        if has_comet:
-            comet_str = f"{r.comet:.4f}" if r.comet is not None else "N/A"
-            print(f"{pair:<12} {r.bleu:>8.2f} {r.chrf:>8.2f} {comet_str:>8} {r.num_samples:>10} {r.num_errors:>8} {r.avg_duration:>9.2f}s")
-        else:
-            print(f"{pair:<12} {r.bleu:>8.2f} {r.chrf:>8.2f} {r.num_samples:>10} {r.num_errors:>8} {r.avg_duration:>9.2f}s")
-    
-    print(f"{'-'*85}")
+        comet_str = f"{r.comet:.4f}" if r.comet is not None else "N/A"
+        table.add_row(pair, comet_str, str(r.num_samples), str(r.num_errors), f"{r.avg_duration:.2f}s")
     
     # Averages
     if results:
-        avg_bleu = sum(r.bleu for r in results) / len(results)
-        avg_chrf = sum(r.chrf for r in results) / len(results)
         total_samples = sum(r.num_samples for r in results)
         total_errors = sum(r.num_errors for r in results)
         avg_duration = sum(r.avg_duration for r in results) / len(results)
+        comet_results = [r.comet for r in results if r.comet is not None]
+        avg_comet = sum(comet_results) / len(comet_results) if comet_results else 0
         
-        if has_comet:
-            comet_results = [r.comet for r in results if r.comet is not None]
-            avg_comet = sum(comet_results) / len(comet_results) if comet_results else 0
-            print(f"{'AVERAGE':<12} {avg_bleu:>8.2f} {avg_chrf:>8.2f} {avg_comet:>8.4f} {total_samples:>10} {total_errors:>8} {avg_duration:>9.2f}s")
-        else:
-            print(f"{'AVERAGE':<12} {avg_bleu:>8.2f} {avg_chrf:>8.2f} {total_samples:>10} {total_errors:>8} {avg_duration:>9.2f}s")
+        table.add_section()
+        table.add_row("AVERAGE", f"{avg_comet:.4f}", str(total_samples), str(total_errors), f"{avg_duration:.2f}s", style="bold")
     
-    print(f"{'='*85}\n")
+    console.print(table)
 
 
-def _format_with_diff(val: float, vals: list, higher_is_better: bool, width: int = 14) -> str:
-    """Format value with diff from best as %, colored green if best, red if worst. Fixed width."""
+def _format_value_rich(val: float, vals: list, higher_is_better: bool) -> str:
+    """Format value with diff from best, using rich markup for colors."""
     best = max(vals) if higher_is_better else min(vals)
     worst = min(vals) if higher_is_better else max(vals)
     
     if val == best:
-        # Best value - green, no diff
-        text = f"{val:.2f}"
-        padded = text.rjust(width)
-        return f"\033[92m{padded}\033[0m"
+        return f"[green]{val:.2f}[/green]"
     else:
-        # Other values - show diff as percentage
         diff_pct = ((val - best) / best) * 100 if best != 0 else 0
         text = f"{val:.2f} ({diff_pct:+.1f}%)"
-        padded = text.rjust(width)
         if val == worst:
-            return f"\033[91m{padded}\033[0m"
-        return padded
+            return f"[red]{text}[/red]"
+        return text
 
 
 def print_comparison(all_results: Dict[str, List[EvalResult]]):
-    """Print comparison table for multiple models using pandas."""
+    """Print comparison table for multiple models using rich."""
     if len(all_results) < 2:
         return
     
+    console = Console()
     names = list(all_results.keys())
-    has_comet = any(r.comet is not None for results in all_results.values() for r in results)
-    metric = "COMET" if has_comet else "chrF"
     
     # Preserve original pair order from first model's results
     first_results = list(all_results.values())[0]
@@ -859,7 +804,7 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
             rows.append({
                 'pair': f"{r.src_lang}->{r.tgt_lang}",
                 'model': name,
-                'score': r.comet if has_comet and r.comet else r.chrf,
+                'score': r.comet if r.comet is not None else 0,
                 'time': r.avg_duration,
                 'errors': r.num_errors
             })
@@ -870,51 +815,28 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
     duplicates = df.groupby(['pair', 'model']).size()
     duplicates = duplicates[duplicates > 1]
     if len(duplicates) > 0:
-        print("\nWarning: Duplicate entries found (will be aggregated):")
+        console.print("\n[yellow]Warning: Duplicate entries found (will be aggregated):[/yellow]")
         for (pair, model), count in duplicates.items():
-            print(f"  {pair} / {model}: {count} entries")
+            console.print(f"  {pair} / {model}: {count} entries")
     
-    # Use pivot_table to handle potential duplicates (aggregates with mean)
+    # Use pivot_table to handle potential duplicates
     score_table = df.pivot_table(index='pair', columns='model', values='score', aggfunc='mean')[names]
     time_table = df.pivot_table(index='pair', columns='model', values='time', aggfunc='mean')[names]
     error_table = df.pivot_table(index='pair', columns='model', values='errors', aggfunc='sum')[names]
     
-    # Column widths based on model names
-    col_w = max(14, max(len(n) for n in names) + 2)  # For score with diff like "0.89 (-1.2%)"
-    time_w = 8  # For time
-    err_w = 4   # For error count
-    pair_w = 14  # For pair with cumulative %
-    
-    # Short labels for error columns only
-    short_err = [f"e{i+1}" for i in range(len(names))]
-    
-    print(f"\n{'='*120}")
-    print(f"COMPARISON: {' vs '.join(names)}")
-    # Legend for error columns
+    # Create table
     err_legend = ", ".join(f"e{i+1}={n}" for i, n in enumerate(names))
-    print(f"Errors: {err_legend}")
-    print(f"{'='*120}")
+    table = Table(title=f"COMPARISON: {' vs '.join(names)}\nErrors: {err_legend}", 
+                  show_header=True, header_style="bold")
     
-    # Header - full names for score/time, short for errors
-    header = f"{'Pair':<{pair_w}}"
+    # Add columns - left align so base numbers line up
+    table.add_column("Pair", style="cyan")
     for name in names:
-        header += f" {name:>{col_w}}"
+        table.add_column(f"{name}\nCOMET", justify="left")
     for name in names:
-        header += f" {(name[:5]+'t'):>{time_w}}"  # Truncated name + t
-    for se in short_err:
-        header += f" {se:>{err_w}}"
-    print(header)
-    
-    # Subheader with metric labels
-    subheader = f"{'':<{pair_w}}"
-    for _ in names:
-        subheader += f" {metric:>{col_w}}"
-    for _ in names:
-        subheader += f" {'sec':>{time_w}}"
-    for _ in names:
-        subheader += f" {'':>{err_w}}"
-    print(subheader)
-    print("-" * len(header))
+        table.add_column(f"{name[:6]}t\nsec", justify="left")
+    for i in range(len(names)):
+        table.add_column(f"e{i+1}", justify="right", width=4)
     
     # Data rows (in original order)
     for pair in pair_order:
@@ -926,51 +848,34 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
         
         # Show cumulative percentage if available
         cum_pct = _PAIR_CUMULATIVE_PCT.get(pair)
-        if cum_pct is not None:
-            pair_display = f"{pair}({cum_pct:.0f}%)"
-        else:
-            pair_display = pair
-        row = f"{pair_display:<{pair_w}}"
+        pair_display = f"{pair}({cum_pct:.0f}%)" if cum_pct is not None else pair
+        
+        row_data = [pair_display]
         for s in scores:
-            row += f" {_format_with_diff(s, scores, True, col_w)}"
+            row_data.append(_format_value_rich(s, scores, True))
         for t in times:
-            # Simpler time format without diff
-            best_t = min(times)
-            if t == best_t:
-                row += f" \033[92m{t:>{time_w}.2f}\033[0m"
-            else:
-                row += f" {t:>{time_w}.2f}"
+            row_data.append(_format_value_rich(t, times, False))
         for e in errors:
-            if e > 0:
-                row += f" \033[91m{e:>{err_w}}\033[0m"
-            else:
-                row += f" {e:>{err_w}}"
-        print(row)
+            row_data.append(f"[red]{e}[/red]" if e > 0 else str(e))
+        table.add_row(*row_data)
     
     # Totals
-    print("-" * len(header))
+    table.add_section()
     avg_scores = list(score_table.mean())
     avg_times = list(time_table.mean())
     total_errors = list(error_table.sum().astype(int))
     
-    row = f"{'AVERAGE':<{pair_w}}"
+    avg_row = ["AVERAGE"]
     for s in avg_scores:
-        row += f" {_format_with_diff(s, avg_scores, True, col_w)}"
+        avg_row.append(_format_value_rich(s, avg_scores, True))
     for t in avg_times:
-        best_t = min(avg_times)
-        if t == best_t:
-            row += f" \033[92m{t:>{time_w}.2f}\033[0m"
-        else:
-            row += f" {t:>{time_w}.2f}"
+        avg_row.append(_format_value_rich(t, avg_times, False))
     for e in total_errors:
-        if e > 0:
-            row += f" \033[91m{e:>{err_w}}\033[0m"
-        else:
-            row += f" {e:>{err_w}}"
-    print(row)
+        avg_row.append(f"[red]{e}[/red]" if e > 0 else str(e))
+    table.add_row(*avg_row, style="bold")
     
-    print(f"{'='*100}")
-    print("\033[92mGreen\033[0m = Best, \033[91mRed\033[0m = Worst/Errors")
+    console.print(table)
+    console.print("[green]Green[/green] = Best, [red]Red[/red] = Worst/Errors")
 
 
 def run_evaluation(
@@ -1000,6 +905,7 @@ def run_evaluation(
     return evaluate_batch(
         pairs=pairs,
         config=config,
+        label=label,
         num_samples=num_samples,
         concurrency=concurrency,
         verbose=verbose,
@@ -1103,11 +1009,10 @@ Config file format (INI):
         else:
             print(f"  {src} -> {tgt}")
     
-    # Load all configs
+    # Load all configs (with CLI overrides like --verbose)
     configs = []
     for config_path in args.configs:
-        config = load_config_from_file(config_path)
-        config.verbose = args.verbose
+        config = config_from_args(args, config_path=config_path)
         configs.append(config)
     
     print(f"\nModels to evaluate ({len(configs)}):")
@@ -1137,7 +1042,7 @@ Config file format (INI):
     # Save results
     if any(all_results.values()):
         combined = {
-            name: [{"src_lang": r.src_lang, "tgt_lang": r.tgt_lang, "bleu": r.bleu, "chrf": r.chrf, "comet": r.comet} for r in results]
+            name: [{"src_lang": r.src_lang, "tgt_lang": r.tgt_lang, "comet": r.comet, "errors": r.num_errors, "avg_time": r.avg_duration} for r in results]
             for name, results in all_results.items() if results
         }
         with open(args.output, 'w') as f:
