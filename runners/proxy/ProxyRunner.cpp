@@ -536,14 +536,24 @@ void ProxyRunner::custom_initialize(td::Promise<td::Unit> promise) {
           std::shared_ptr<ton::http::HttpPayload> payload,
           td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
               promise) {
-        http_send_static_answer(http_enable_disable(std::numeric_limits<td::int64>::max()), std::move(promise));
+        if (request->method() != "POST" && request->method() != "post") {
+          http_send_static_answer(wrap_short_answer_to_http("disable must be a post request"), std::move(promise));
+        } else {
+          http_send_static_answer(http_enable_disable(std::numeric_limits<td::int64>::max()), std::move(promise));
+        }
       });
   register_custom_http_handler(
       "/request/enable",
       [&](std::string url, std::map<std::string, std::string> get_args, std::unique_ptr<ton::http::HttpRequest> request,
           std::shared_ptr<ton::http::HttpPayload> payload,
           td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
-              promise) { http_send_static_answer(http_enable_disable(0), std::move(promise)); });
+              promise) {
+        if (request->method() != "POST" && request->method() != "post") {
+          http_send_static_answer(wrap_short_answer_to_http("enable must be a post request"), std::move(promise));
+        } else {
+          http_send_static_answer(http_enable_disable(0), std::move(promise));
+        }
+      });
 }
 
 void ProxyRunner::initialize_sc(std::shared_ptr<RunnerConfig> snapshot_runner_config,
@@ -1620,10 +1630,15 @@ std::string ProxyRunner::http_generate_main() {
     }
     sb << "<tr><td>enabled</td><td>";
     if (is_disabled_until_version_ == 0) {
-      sb << "<span style=\"background-color:Green;\">yes</span> <a href=\"/request/disable\">disable</a>";
+      sb << "<span style=\"background-color:Green;\">yes</span>";
+      sb << "<form method=\"post\" action=\"/request/disable\">"
+         << "<button type=\"submit\" name=\"disable\" value=\"yes I am sure\">disable</button></form>\n";
     } else {
       sb << "<span style=\"background-color:Crimson;\">no until config version " << is_disabled_until_version_
-         << "<a href=\"/request/enable\">enable from next config version</a>" << "</span>";
+         << "</span>";
+      sb << "<form method=\"post\" action=\"/request/enable\">"
+         << "<button type=\"submit\" name=\"enable\" value=\"yes I am sure\">enable from the next "
+            "version</button></form>\n";
     }
     sb << "</td></tr>\n";
     sb << "<tr><td>version</td><td>commit " << GitMetadata::CommitSHA1() << " at " << GitMetadata::CommitDate()
