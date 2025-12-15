@@ -175,7 +175,7 @@ extern "C" sgx_status_t ecall_gen_key(const sgx_target_info_t *sgx_target_info, 
   // Derive sealing key (specific to this enclave's hash)
   sgx_key_request_t key_request = {};
   key_request.key_name = SGX_KEYSELECT_SEAL;
-  key_request.key_policy = SGX_KEYPOLICY_MRSIGNER;
+  key_request.key_policy = SGX_KEYPOLICY_MRENCLAVE;
 
   sgx_key_128bit_t sealing_key;
   SGX_TRY(sgx_get_key(&key_request, &sealing_key), "Failed to derive sealing key: 0x%x", int(status));
