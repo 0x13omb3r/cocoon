@@ -72,7 +72,7 @@ class HealthClient final : public td::TaskActor<td::Unit> {
     if (status.is_error()) {
       LOG(ERROR) << "Error: " << status.error();
     }
-    td::actor::SchedulerContext::get()->stop();
+    td::actor::SchedulerContext::get().stop();
     co_return td::Unit{};
   }
 };

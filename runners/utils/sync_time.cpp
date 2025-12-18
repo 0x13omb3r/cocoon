@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  td::set_signal_handler(td::SignalType::User, [](int) { td::actor::SchedulerContext::get()->stop(); }).ensure();
+  td::set_signal_handler(td::SignalType::User, [](int) { td::actor::SchedulerContext::get().stop(); }).ensure();
 
   td::actor::Scheduler scheduler({2});
 
